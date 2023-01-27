@@ -1,0 +1,480 @@
+---
+title: "Cartographie du bruit GeoClimate-NoiseModelling"
+author: "Gwenaël GUILLAUME"
+date: "2022-12-02"
+output:
+  bookdown::html_document2:
+    fig_caption: yes
+    lib_dir: "./lib"
+    toc: true
+fig_caption: yes
+header-includes:
+  -\usepackage{subfig}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      eval.after = "fig.cap")
+library(stringr)
+library(rjson)
+suppressPackageStartupMessages(library(geojson))
+library(sfheaders)
+library(tidyr)
+suppressPackageStartupMessages(library(dplyr))
+library(sf)
+library(sp)
+suppressPackageStartupMessages(library(plyr))
+library(processx)
+library(RColorBrewer)
+library(leaflet)
+source('mapping_functions.R')
+```
+
+```{r init-gc-parameters, echo=FALSE, include=TRUE}
+gc.params <- list(location = 'Saint-Jean-la-Poterie', 
+                  config.file = 'config_file.json', 
+                  srid = 2154)
+gc.params$out.path = paste('./gc_outputs', gc.params$location, sep = .Platform$file.sep)
+```
+
+```{r init-nm-parameters, echo=FALSE, include=TRUE}
+nm.params = list(in.path = './nm_inputs', 
+                 out.path = './nm_outputs', 
+                 recs.grid.type = 'delaunay_grid', # 'random_grid'
+                 nReceivers = 100, 
+                 receiversHeight = 4.0, 
+                 maxPropDist = 250, 
+                 maxArea = 2500, 
+                 roadWidth = 2, 
+                 isoSurfaceInBuildings = 0, 
+                 wallAlpha = 0.1, 
+                 reflOrder = 1, 
+                 maxSrcDist = 450, 
+                 maxReflDist = 150, 
+                 threadNumber = 0, 
+                 diffVertical = 0, 
+                 diffHorizontal = 0, 
+                 humidity = 0.7, 
+                 temperature = 15)
+nm.fpaths <- data.frame('building' = paste(nm.params$in.path, gc.params$location, 'building.geojson', sep = .Platform$file.sep), 
+                        'ground' = paste(nm.params$in.path, gc.params$location, 'ground.geojson', sep = .Platform$file.sep), 
+                        'road_traffic' = paste(nm.params$in.path, gc.params$location, 'road_traffic.geojson', sep = .Platform$file.sep), 
+                        'dem' = paste(nm.params$in.path, gc.params$location, 'dem.geojson', sep = .Platform$file.sep), 
+                        'lw_roads' = paste(nm.params$out.path, gc.params$location, 'lw_roads.geojson', sep = .Platform$file.sep), 
+                        'propagation_domain' = paste(nm.params$out.path, gc.params$location, 'propagation_domain.geojson', sep = .Platform$file.sep), 
+                        'receivers' = paste(nm.params$out.path, gc.params$location, 'receivers.geojson', sep = .Platform$file.sep), 
+                        'triangles' = paste(nm.params$out.path, gc.params$location, 'triangles.geojson', sep = .Platform$file.sep), 
+                        'lday' = paste(nm.params$out.path, gc.params$location, 'lday.geojson', sep = .Platform$file.sep), 
+                        'levening' = paste(nm.params$out.path, gc.params$location, 'levening.geojson', sep = .Platform$file.sep), 
+                        'lnight' = paste(nm.params$out.path, gc.params$location, 'lnight.geojson', sep = .Platform$file.sep), 
+                        'lden' = paste(nm.params$out.path, gc.params$location, 'lden.geojson', sep = .Platform$file.sep), 
+                        'contouring_lday' = paste(nm.params$out.path, gc.params$location, 'contouring_lday.geojson', sep = .Platform$file.sep), 
+                        'contouring_levening' = paste(nm.params$out.path, gc.params$location, 'contouring_levening.geojson', sep = .Platform$file.sep), 
+                        'contouring_lnight' = paste(nm.params$out.path, gc.params$location, 'contouring_lnight.geojson', sep = .Platform$file.sep), 
+                        'contouring_lden' = paste(nm.params$out.path, gc.params$location, 'contouring_lden.geojson', sep = .Platform$file.sep))
+```
+
+```{r create-nm-folders, echo=FALSE, include=TRUE}
+nm.fpaths.input <- paste(nm.params$in.path, gc.params$location, sep = .Platform$file.sep)
+if(!dir.exists(nm.fpaths.input)){dir.create(nm.fpaths.input)}
+nm.fpaths.output <- paste(nm.params$out.path, gc.params$location, sep = .Platform$file.sep)
+if(!dir.exists(nm.fpaths.output)){dir.create(nm.fpaths.output)}
+```
+
+# GeoClimate
+
+## Configuration
+
+GeoClimate 0.0.2 is run by the following shell command:
+```{r gc-java-cmd, echo=FALSE, include=TRUE}
+gc.java.cmd <- paste0('java -jar geoclimate-0.0.2-SNAPSHOT.jar -f ', gc.params$config.file)
+cat(gc.java.cmd)
+```
+
+The configuration file is generated according to the following parameters: 
+
+`r paste0('* **', names(gc.params), ':** ', gc.params, collapse=',\n')`.
+
+The GeoClimate input configuration file is thus:
+
+```{r gc-config, echo=FALSE, include=TRUE}
+gc.config = paste0(
+'{
+  "description" :"GeoClimate configuration file",
+  "geoclimatedb": {"folder": "/tmp/geoclimate",
+                   "name": "geoclimate_chain_db;AUTO_SERVER=TRUE",
+                   "delete": false},
+  "input": {"locations": ["', gc.params$location, '"]},
+            "output": {"folder": {"path": "', dirname(gc.params$out.path) ,'",
+                       "tables": ["building", "road_traffic", "ground_acoustic"]},
+                       "srid": ', gc.params$srid, '},
+  "parameters": {"rsu_indicators": {"indicatorUse": ["LCZ"], 
+                                    "estimateHeight": true},
+                "distance": ', nm.params$maxPropDist, ', 
+                "road_traffic": true,  
+                "noise_indicators": {"ground_acoustic": true}}
+}')
+cat(gc.config)
+```
+
+```{r gc-run, echo=FALSE, include=FALSE}
+if(dir.exists(gc.params$out.path)){
+  del.prev.gc.data <- askYesNo(msg = paste('Folder', gc.params$out.path, 'already exists. Do you want to delete it?', sep = .Platform$file.sep), default = FALSE)
+  if(isTRUE(del.prev.gc.data)){
+    overwrite.files <- TRUE
+    unlink(gc.params$out.path, recursive = TRUE)
+    writeLines(gc.config, gc.params$config.file)                                               # Write geoclimate configuration file
+    system(command = gc.java.cmd)                                                              # Run java command
+    gc.osm.folder.name <- grep("osm", list.dirs(path = './gc_outputs', recursive = FALSE), value = TRUE)
+    system(command = paste('mv', gc.osm.folder.name, gc.params$out.path, sep = ' '))           # Rename automatic Geoclimate output folder (remove 'osm' in name)
+    file.copy(from = gc.params$config.file, 
+              to = paste(gc.params$out.path, gc.params$config.file, sep = .Platform$file.sep)) # Make a copy of the configuration file to output folder
+  } else if(isFALSE(del.prev.gc.data)){
+    message('Loading previous dataset')
+    overwrite.files <- FALSE
+  } else if(is.na(del.prev.gc.data)){
+    stop('Execution stopped!')
+  }
+} else {
+  system(command = gc.java.cmd)                                                              # Run java command
+  writeLines(gc.config, gc.params$config.file)                                               # Write geoclimate configuration file
+  gc.osm.folder.name <- grep("osm", list.dirs(path = './gc_outputs', recursive = FALSE), value = TRUE)
+  system(command = paste('mv', gc.osm.folder.name, gc.params$out.path, sep = ' '))           # Rename automatic Geoclimate output folder (remove 'osm' in name)
+  file.copy(from = gc.params$config.file, 
+            to = paste(gc.params$out.path, gc.params$config.file, sep = .Platform$file.sep)) # Make a copy of the configuration file to output folde
+}
+```
+
+## Output layers
+
+```{r gc-db-out, echo=FALSE, include=FALSE}
+gc.db.building <- upload_geojson(path = gc.params$out.path, 'building')
+gc.db.ground <- upload_geojson(path = gc.params$out.path, 'ground_acoustic')
+gc.db.road_traffic <- upload_geojson(path = gc.params$out.path, 'road_traffic')
+```
+
+### Building {#gc_building}
+
+Building data, presented at figure \@ref(fig:map-buildings-height), gather the following attributes:
+
+`r paste0('* **', colnames(gc.db.building), collapse='**\n')`**.
+
+```{r map-buildings-height, echo=FALSE, include=TRUE, fig.cap="Building layer output from GeoClimate.", out.width="80%", fig.align='center', fig.pos='!h'}
+map_building(building = gc.db.building)
+```
+
+### Ground {#gc_ground}
+
+Ground data give the following information:
+
+`r paste0('* **', colnames(gc.db.ground), collapse='**\n')`**.
+
+Figures \@ref(fig:map-ground-nature) and \@ref(fig:map-ground-acoustic-absorption) present the nature of ground and its acoustic absorption respectively.
+
+```{r map-ground-nature, echo=FALSE, include=TRUE, fig.cap="Types of soil.", out.width="80%", fig.asp=1, fig.align='center', fig.pos='!h'}
+map_ground_nature(ground = gc.db.ground)
+```
+
+```{r map-ground-acoustic-absorption, echo=FALSE, include=TRUE, fig.cap="Ground acoustic absorption.", out.width="80%", fig.asp=1, fig.align='center', fig.pos='!h'}
+map_ground_absorption(ground = gc.db.ground)
+```
+
+### Roads {#gc_roads}
+
+Road data provide the following information:
+
+`r paste0('* **', colnames(gc.db.road_traffic), collapse='**\n')`**.
+
+Figures \@ref(fig:map-road-surfaces) and \@ref(fig:map-road-types) present the road surfaces and types respectively. Figures \@ref(fig:map-road-daily-traffic) and \@ref(fig:map-road-pvmt) illustrate the daily traffic and road pavement types respectively. 
+
+```{r map-road-surfaces, echo=FALSE, include=TRUE, fig.cap="Road surfaces.", out.width="80%", fig.asp=1, fig.align='center', fig.pos='!h'}
+map_road_surfaces(road_traffic = gc.db.road_traffic)
+```
+
+```{r map-road-types, echo=FALSE, include=TRUE, fig.cap="Road types.", out.width="80%", fig.asp=1, fig.align='center', fig.pos='!h'}
+map_road_types(road_traffic = gc.db.road_traffic)
+```
+
+```{r map-road-daily-traffic, echo=FALSE, include=TRUE, fig.cap="Road daily traffic.", out.width="80%", fig.asp=1, fig.align='center', fig.pos='!h'}
+map_daily_traffic(road_traffic = gc.db.road_traffic)
+```
+
+```{r map-road-pvmt, echo=FALSE, include=TRUE, fig.cap="Road pavements", out.width="80%", fig.asp=1, fig.align='center', fig.pos='!h'}
+map_road_pvmt(road_traffic = gc.db.road_traffic)
+```
+
+# NoiseModelling
+
+## Input layers
+
+### Building
+
+The building layer issued from GeoClimate (see section \@ref(gc_building)) is updated by adding a new attribute named 'HEIGHT' that corresponds with the already existing field 'HEIGHT_ROOF'. The building map is thus the same as figure \@ref(fig:map-buildings-height).
+
+```{r nm-building, echo=FALSE, include=FALSE}
+nm.db.building <- gc.db.building %>% 
+  mutate(HEIGHT = HEIGHT_ROOF)
+sf::st_write(nm.db.building, nm.fpaths$building, append=FALSE, delete_dsn=TRUE, quiet=TRUE)
+```
+
+### Ground absorption
+
+The ground layer provided by GeoClimate (see section \@ref(gc_ground)) provides all information required by NoiseModelling.
+
+```{r nm-ground, echo=FALSE, include=FALSE}
+nm.db.ground <- gc.db.ground
+sf::st_write(nm.db.ground, nm.fpaths$ground, append=FALSE, delete_dsn=TRUE, quiet=TRUE)
+```
+
+### Road traffic
+
+The road layer given by GeoClimate (see section \@ref(gc_roads)) necessitate to update the names of traffic-related fields before being integrated in NoiseModelling, namely :
+
+* **DAY_LV_HOUR** &rarr; **LV_D**
+* **LV_E** &rarr; **EV_LV_HOUR**
+* **LV_N** &rarr; **NIGHT_LV_HOUR**
+* **LV_SPD_D** &rarr; **DAY_LV_SPEED**
+* **LV_SPD_E** &rarr; **EV_LV_SPEED**
+* **LV_SPD_N** &rarr; **NIGHT_LV_SPEED**
+* **HGV_D** &rarr; **DAY_HV_HOUR**
+* **HGV_E** &rarr; **EV_HV_HOUR**
+* **HGV_N** &rarr; **NIGHT_HV_HOUR**
+* **HGV_SPD_D** &rarr; **DAY_HV_SPEED**
+* **HGV_SPD_E** &rarr; **EV_HV_SPEED**
+* **HGV_SPD_N** &rarr; **NIGHT_HV_SPEED**
+* **PVMT** &rarr; **PAVEMENT**
+* **WAY** &rarr; **DIRECTION**
+                           
+```{r nm-road-traffic, echo=FALSE, include=FALSE}
+nm.db.road.traffic <- gc.db.road_traffic
+names(nm.db.road.traffic)[names(nm.db.road.traffic) == "DAY_LV_HOUR"] <- "LV_D"
+names(nm.db.road.traffic)[names(nm.db.road.traffic) == "EV_LV_HOUR"] <- "LV_E"
+names(nm.db.road.traffic)[names(nm.db.road.traffic) == "NIGHT_LV_HOUR"] <- "LV_N"
+names(nm.db.road.traffic)[names(nm.db.road.traffic) == "DAY_LV_SPEED"] <- "LV_SPD_D"
+names(nm.db.road.traffic)[names(nm.db.road.traffic) == "EV_LV_SPEED"] <- "LV_SPD_E"
+names(nm.db.road.traffic)[names(nm.db.road.traffic) == "NIGHT_LV_SPEED"] <- "LV_SPD_N"
+names(nm.db.road.traffic)[names(nm.db.road.traffic) == "DAY_HV_HOUR"] <- "HGV_D"
+names(nm.db.road.traffic)[names(nm.db.road.traffic) == "EV_HV_HOUR"] <- "HGV_E"
+names(nm.db.road.traffic)[names(nm.db.road.traffic) == "NIGHT_HV_HOUR"] <- "HGV_N"
+names(nm.db.road.traffic)[names(nm.db.road.traffic) == "DAY_HV_SPEED"] <- "HGV_SPD_D"
+names(nm.db.road.traffic)[names(nm.db.road.traffic) == "EV_HV_SPEED"] <- "HGV_SPD_E"
+names(nm.db.road.traffic)[names(nm.db.road.traffic) == "NIGHT_HV_SPEED"] <- "HGV_SPD_N"
+names(nm.db.road.traffic)[names(nm.db.road.traffic) == "PAVEMENT"] <- "PVMT"
+names(nm.db.road.traffic)[names(nm.db.road.traffic) == "DIRECTION"] <- "WAY"
+sf::st_write(nm.db.road.traffic, nm.fpaths$road_traffic, append=FALSE, delete_dsn=TRUE, quiet=TRUE)
+```
+
+### Digital Elevation Model
+
+The Digital Elevation Model cannot be provided by GeoClimate since this information is lacking in OpenStreetMap database. Thus a flat ground is artificially created based on the bounding box of the ground layer.
+
+```{r nm-dem, echo=FALSE, include=FALSE}
+bbox <- st_bbox(gc.db.ground)
+nm.db.dem <-  st_sf(geometry = st_sfc(st_point(c(bbox['xmin'], bbox['ymin'])), 
+                                      st_point(c(bbox['xmin'], bbox['ymax'])), 
+                                      st_point(c(bbox['xmax'], bbox['ymin'])), 
+                                      st_point(c(bbox['xmax'], bbox['ymax']))), 
+                    height = c(0, 0), 
+                    crs = gc.params$srid)
+sf::st_write(nm.db.dem, nm.fpaths$dem, append=FALSE, delete_dsn=TRUE, quiet=TRUE)
+```
+
+## Database feed and noise calculations
+
+### Database preparation
+
+The NoiseModelling database if first cleaned by running the following WPS script:
+
+```{bash nm-clean-db, echo=FALSE, include=TRUE}
+./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Database_Manager/Clean_Database.groovy -areYouSure 1
+```
+
+```{bash nm-display-db-after-cleaning, echo=FALSE, include=FALSE}
+./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Database_Manager/Display_Database.groovy -showColumns 1
+```
+
+Then, the previously formatted layers for building, ground and road traffic are uploaded to the NoiseModelling database and a primary key is inserted for each layer:
+
+```{r nm-upload-db-cmds, echo=FALSE, include=TRUE}
+# Building
+cmd.upload.building <- paste0("./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Import_and_Export/Import_File.groovy -pathFile ", nm.fpaths$building, " && ./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Database_Manager/Add_Primary_Key.groovy -tableName BUILDING -pkName PK_BUILDING")
+cat(cmd.upload.building)
+# Ground
+cmd.upload.ground <- paste0("./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Import_and_Export/Import_File.groovy -pathFile ", nm.fpaths$ground, " && ./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Database_Manager/Add_Primary_Key.groovy -tableName GROUND -pkName PK_GROUND")
+cat(cmd.upload.ground)
+# Road traffic
+cmd.upload.road.traffic <- paste0("./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Import_and_Export/Import_File.groovy -pathFile ", nm.fpaths$road_traffic, " && ./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Database_Manager/Add_Primary_Key.groovy -tableName ROAD_TRAFFIC -pkName PK_ROAD")
+cat(cmd.upload.road.traffic)
+# DEM
+cmd.upload.dem <- paste0("./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Import_and_Export/Import_File.groovy -pathFile ", nm.fpaths$dem," && ./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Database_Manager/Add_Primary_Key.groovy -tableName DEM -pkName PK_DEM")
+cat(cmd.upload.dem)
+```
+
+```{r nm-upload-db, echo=FALSE, include=FALSE}
+system(cmd.upload.building)
+system(cmd.upload.ground)
+system(cmd.upload.road.traffic)
+system(cmd.upload.dem)
+```
+
+### Road emission calculation
+
+The road emission is calculated from the road traffic layer thanks to the following command:
+
+```{bash nm-road-emission, echo=FALSE, include=TRUE}
+./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/NoiseModelling/Road_Emission_from_Traffic.groovy -tableRoads ROAD_TRAFFIC 2> road_emission.md
+./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Database_Manager/Add_Primary_Key.groovy -tableName LW_ROADS -pkName PK_ROAD
+```
+
+```{r nm-download-noise-emission, echo=FALSE, include=TRUE}
+cmd.download.lwroads <- paste0("./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Import_and_Export/Export_Table.groovy -exportPath ", nm.fpaths$lw_roads , " -tableToExport LW_ROADS")
+system(cmd.download.lwroads)
+```
+
+### Generation of the grid of receivers
+
+```{r nm-receivers-type, echo=FALSE, include=FALSE}
+gen_random_grid <- nm.params$recs.grid.type == 'random_grid'
+gen_delaunay_grid <- nm.params$recs.grid.type == 'delaunay_grid'
+nm.db.propa.dom <- sf_polygon(rbind(c(bbox['xmin'], bbox['ymin']), 
+                                    c(bbox['xmax'], bbox['ymin']), 
+                                    c(bbox['xmax'], bbox['ymax']), 
+                                    c(bbox['xmin'], bbox['ymax'])),
+                              close = TRUE) %>% 
+  st_set_crs(gc.params$srid)
+nm.outfolder <- paste("./nm_outputs", gc.params$location, sep = .Platform$file.sep)
+if(!dir.exists(nm.outfolder)){
+  dir.create(nm.outfolder)
+}
+sf::st_write(nm.db.propa.dom, nm.fpaths$propagation_domain, append=FALSE, delete_dsn=TRUE, quiet=TRUE)
+nm.db.propa.dom.wgs84 <- st_transform(nm.db.propa.dom, CRS("+proj=longlat +init=epsg:4326 +ellps=WGS84 +datum=WGS84 +no_defs"))
+recs.fence <- st_as_text(st_geometry(nm.db.propa.dom.wgs84))
+recs.fence_txt <- paste0("'", recs.fence, "'")
+```
+
+```{r nm-generate-receivers-delaunay, echo=FALSE, include=TRUE, eval=gen_delaunay_grid}
+cmd.gen.delaunay.grid <- paste0("./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Receivers/Delaunay_Grid.groovy -tableBuilding BUILDING -sourcesTableName ROAD_TRAFFIC -fence ", recs.fence_txt, " -maxPropDist ", nm.params$maxPropDist, " -roadWidth ", nm.params$roadWidth, " -maxArea ", nm.params$maxArea, " -height ", nm.params$receiversHeight, " -isoSurfaceInBuildings ", nm.params$isoSurfaceInBuildings, " 2> receiver_grid_generation.md")
+system(cmd.gen.delaunay.grid)
+```
+
+```{r nm-generate-receivers-random-grid, echo=FALSE, include=TRUE, eval=gen_random_grid}
+cmd.gen.rand.recs <- paste0("./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Receivers/Random_Grid.groovy -buildingTableName BUILDING -sourcesTableName ROAD_TRAFFIC -nReceivers ", nm.params$nReceivers, " -height ", nm.params$receiversHeight, " -fence ", recs.fence_txt, " 2> receiver_grid_generation.md")
+if(isTRUE(gen_random_grid)){system(cmd.gen.rand.recs)}
+```
+
+```{r nm-download-receivers, echo=FALSE, include=FALSE}
+cmd.download.recs <- paste0("./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Import_and_Export/Export_Table.groovy -exportPath ", nm.fpaths$receivers , " -tableToExport RECEIVERS")
+system(cmd.download.recs)
+receivers <- sf::st_read(nm.fpaths$receivers, quiet=TRUE)
+```
+
+`r nrow(receivers)` receivers are generated at a height of `r nm.params$receiversHeight` m as a `r paste0(strsplit(nm.params$recs.grid.type, split = "_")[[1]], collapse = " ")` based on both the building and road layers. The receivers are created inside the studied area defined by the previous bounding box (see section \@ref()), that is: `r recs.fence`. Figure \@ref(fig:map-`r ifelse(gen_delaunay_grid, "map-delaunay-recs-grid", "map-rand-recs-grid")`) shows the generated receivers.
+
+```{r nm-generate-receivers-message, echo=FALSE, include=FALSE, comment = ''}
+cat(readLines(con = 'receiver_grid_generation.md'), sep = '\n')
+```
+
+```{r nm-download-triangles-delaunay, echo=FALSE, include=FALSE, eval=gen_delaunay_grid}
+cmd.download.triangles <- paste0("./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Import_and_Export/Export_Table.groovy -exportPath ", nm.fpaths$triangles , " -tableToExport TRIANGLES")
+system(cmd.download.triangles)
+triangles <- sf::st_read(nm.fpaths$triangles, quiet=TRUE)
+```
+
+```{r map-rand-recs-grid, echo=FALSE, include=TRUE, fig.cap=paste(str_to_sentence(paste(strsplit(nm.params$recs.grid.type, split = "_")[[1]], collapse = " ")), "of receivers.", sep = " "), out.width="80%", fig.asp=1, fig.align='center', fig.pos='!h', eval=gen_random_grid}
+map_random_grid_receivers(recs_grid=receivers)
+```
+
+```{r map-delaunay-recs-grid, echo=FALSE, include=TRUE, fig.cap=paste(str_to_sentence(paste(strsplit(nm.params$recs.grid.type, split = "_")[[1]], collapse = " ")), "of receivers and triangles.", sep = " "), out.width="80%", fig.asp=1, fig.align='center', fig.pos='!h', eval=gen_delaunay_grid}
+map_delaunay_grid_receivers(recs_grid=receivers, tris=triangles)
+```
+
+
+```{r nm-display-db-before-simu, echo=FALSE, include=FALSE}
+cmd.display.db <- paste0("./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Database_Manager/Display_Database.groovy -showColumns 1")
+system(cmd.display.db)
+```
+
+<!-- ```{bash nm-display-db, echo=FALSE, include=FALSE} -->
+<!-- ./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Database_Manager/Display_Database.groovy -showColumns 1 2> display_database.md -->
+<!-- ./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Database_Manager/Table_Visualization_Data.groovy -tableName LW_ROADS -linesNumber 10 -->
+<!-- ``` -->
+
+<!-- ```{r nm-display-database-message, echo=FALSE, include=FALSE, comment = ''} -->
+<!-- cat(readLines(con = 'display_database.md'), sep = '\n') -->
+<!-- ``` -->
+
+### Noise propagation calculation
+
+The noise propagation calculation are run based on the following input parameters:
+
+`r paste0('* **', names(nm.params), ':** ', nm.params, collapse=',\n')`.
+
+The whole WPS command is thus:
+
+```{r nm-run-calc, echo=FALSE, include=TRUE}
+cmd.run.propa <- paste0("./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s ./NoiseModelling_without_gui/noisemodelling/wps/NoiseModelling/Noise_level_from_traffic.groovy -tableBuilding BUILDING -tableRoads ROAD_TRAFFIC -tableReceivers RECEIVERS -tableDEM DEM -tableGroundAbs GROUND -paramWallAlpha ", nm.params$wallAlpha, " -confReflOrder ", nm.params$reflOrder, " -confMaxSrcDist ", nm.params$maxSrcDist, " -confMaxReflDist ", nm.params$maxReflDist, " -confThreadNumber ", nm.params$threadNumber, " -confDiffVertical ", nm.params$diffVertical, " -confDiffHorizontal ", nm.params$diffHorizontal, " -confHumidity ", nm.params$humidity, " -confTemperature ", nm.params$temperature)
+cat(cmd.run.propa)
+prev.results.exists.action <- FALSE
+if(file.exists(nm.fpaths$lday) | file.exists(nm.fpaths$levening) | file.exists(nm.fpaths$lnight) | file.exists(nm.fpaths$lden)){
+  prev.results.exists.action <- askYesNo(msg = paste('Previsous results exist for Lday, Levening, Lnight and/or Lden. Do you want to delete them?', sep = .Platform$file.sep), default = FALSE)
+  if(isTRUE(prev.results.exists.action)){
+    system(cmd.run.propa)
+  } else{
+    print('Uploading previous results')
+    cmd.upload.prev.res <- paste0("./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Import_and_Export/Import_File.groovy -pathFile ", nm.fpaths$triangles, " -tableName TRIANGLES && ./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Import_and_Export/Import_File.groovy -pathFile ", nm.fpaths$lden, " -tableName LDEN_GEOM && ./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Import_and_Export/Import_File.groovy -pathFile ", nm.fpaths$ln, " -tableName LNIGHT_GEOM")
+    system(cmd.upload.prev.res)
+  }
+} else {
+  system(cmd.run.propa)
+}
+```
+
+```{r nm-download-noise-lvls, echo=FALSE, include=FALSE, eval=prev.results.exists.action}
+cmd.nm.res.lday <- paste0("./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Import_and_Export/Export_Table.groovy -exportPath ", nm.fpaths$lday, " -tableToExport LDAY_GEOM")
+system(cmd.nm.res.lday)
+cmd.nm.res.levening <- paste0("./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Import_and_Export/Export_Table.groovy -exportPath  ", nm.fpaths$levening, " -tableToExport LEVENING_GEOM")
+system(cmd.nm.res.levening)
+cmd.nm.res.lnight <- paste0("./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Import_and_Export/Export_Table.groovy -exportPath  ", nm.fpaths$lnight, " -tableToExport LNIGHT_GEOM")
+system(cmd.nm.res.lnight)
+cmd.nm.res.lden <- paste0("./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Import_and_Export/Export_Table.groovy -exportPath  ", nm.fpaths$lden, " -tableToExport LDEN_GEOM")
+system(cmd.nm.res.lden)
+```
+
+```{r nm-delaunay-isocontours-lden-ln, echo=FALSE, include=FALSE, eval=gen_delaunay_grid}
+cmd.delaunay.isocontours.lden <- paste0("./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Acoustic_Tools/Create_Isosurface.groovy -resultTable LDEN_GEOM -isoClass '35.0,40.0,45.0,50.0,55.0,60.0,65.0,70.0,75.0,80.0,200.0' -smoothCoefficient 0.0")
+system(cmd.delaunay.isocontours.lden)
+cmd.delaunay.isocontours.ln = paste0("./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Acoustic_Tools/Create_Isosurface.groovy -resultTable LNIGHT_GEOM -isoClass '35.0,40.0,45.0,50.0,55.0,60.0,65.0,70.0,75.0,80.0,200.0' -smoothCoefficient 0.0")
+system(cmd.delaunay.isocontours.ln)
+```
+
+```{r nm-download-contouring-lden-ln, echo=FALSE, include=FALSE, eval=gen_delaunay_grid}
+cmd.download.contouring.lden <- paste0("./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Import_and_Export/Export_Table.groovy -exportPath ", nm.fpaths$contouring_lden ," -tableToExport CONTOURING_NOISE_MAP")
+system(cmd.download.contouring.lden)
+cmd.download.contouring.ln <- paste0("./NoiseModelling_without_gui/bin/wps_scripts -w ./ -s NoiseModelling_without_gui/noisemodelling/wps/Import_and_Export/Export_Table.groovy -exportPath ", nm.fpaths$contouring_ln ," -tableToExport CONTOURING_NOISE_MAP")
+system(cmd.download.contouring.ln)
+```
+
+## Results
+
+Figures \@ref(fig:map-rand-recs-lden-laeq) and \@ref(fig:map-delaunay-recs-lden-laeq) shows the noise levels at receivers and iso-noise levels respectively for the Lden indicator. Figures \@ref(fig:map-rand-recs-ln-laeq) and \@ref(fig:map-delaunay-recs-ln-laeq) present the same results for the Ln indicator.
+
+```{r map-rand-recs-lden-laeq, echo=FALSE, include=TRUE, fig.cap="Lden at receivers.", out.width="80%", fig.asp=1, fig.align='center', fig.pos='!h'}
+lden_recs <- sf::st_read(nm.fpaths$lden, quiet=TRUE)
+map_noise_lvl_recs_grid(noise_levels_recs_grid=lden_recs)
+```
+
+```{r map-delaunay-recs-lden-laeq, echo=FALSE, include=TRUE, fig.cap="Iso-noise levels (Lden).", out.width="80%", fig.asp=1, fig.align='center', fig.pos='!h', eval=gen_delaunay_grid}
+lden_delaunay <- sf::st_read(nm.fpaths$contouring_lden, quiet=TRUE)
+map_noise_lvl_delaunay_grid(noise_levels_delaunay_grid=lden_delaunay)
+```
+
+```{r map-rand-recs-ln-laeq, echo=FALSE, include=TRUE, fig.cap="Ln at receivers.", out.width="80%", fig.asp=1, fig.align='center', fig.pos='!h'}
+ln_recs <- sf::st_read(nm.fpaths$ln, quiet=TRUE)
+map_noise_lvl_recs_grid(noise_levels_recs_grid=ln_recs)
+```
+
+```{r map-delaunay-recs-ln-laeq, echo=FALSE, include=TRUE, fig.cap="Iso-noise levels (Ln).", out.width="80%", fig.asp=1, fig.align='center', fig.pos='!h', eval=gen_delaunay_grid}
+ln_delaunay <- sf::st_read(nm.fpaths$contouring_ln, quiet=TRUE)
+map_noise_lvl_delaunay_grid(noise_levels_delaunay_grid=ln_delaunay)
+```
+
