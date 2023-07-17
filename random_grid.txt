@@ -1,0 +1,14 @@
+WARNING: An illegal reflective access operation has occurred
+WARNING: Illegal reflective access by org.codehaus.groovy.vmplugin.v7.Java7$1 (file:/home/gguillaume/Documents/Scripts/Carto_GeoClimate_NoiseModelling/NoiseModelling_without_gui/lib/groovy-2.5.5.jar) to constructor java.lang.invoke.MethodHandles$Lookup(java.lang.Class,int)
+WARNING: Please consider reporting this to the maintainers of org.codehaus.groovy.vmplugin.v7.Java7$1
+WARNING: Use --illegal-access=warn to enable warnings of further illegal reflective access operations
+WARNING: All illegal access operations will be denied in a future release
+[main] INFO org.noise_planet.noisemodelling - Start : Random grid
+[main] INFO org.noise_planet.noisemodelling - inputs {sourcesTableName=ROAD_TRAFFIC, s=NoiseModelling_without_gui/noisemodelling/wps/Receivers/Random_Grid.groovy, buildingTableName=BUILDING, nReceivers=100, w=./, progressVisitor=org.noise_planet.noisemodelling.pathfinder.RootProgressVisitor@3b05a99b, height=4.0}
+[main] INFO org.noise_planet.noisemodelling - Create spatial index on RECEIVERS
+[main] INFO org.noise_planet.noisemodelling - Delete receivers where buildings...
+[main] INFO org.noise_planet.noisemodelling - Delete receivers where sound sources...
+[main] INFO org.noise_planet.noisemodelling - Add Primary Key column...
+[main] INFO org.noise_planet.noisemodelling - Result : Process done. Table of receivers RECEIVERS created !
+[main] INFO org.noise_planet.noisemodelling - End : Random grid
+[main] INFO org.noise_planet - Process done. Table of receivers RECEIVERS created !
